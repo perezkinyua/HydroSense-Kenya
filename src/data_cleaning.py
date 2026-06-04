@@ -33,13 +33,6 @@ weather['humidity_pct'] = weather['humidity_pct'].fillna(humidity_mean)
 temp_median = weather.loc[weather['temperature_c'] != 45.8, 'temperature_c'].median()
 weather['temperature_c'] = weather['temperature_c'].replace(45.8, temp_median)
 
-# W4: rainfall 85 mm flagged but retained (real meteorological event)
-#['rainfall_flag'] = weather['rainfall_mm'] > (
-#    weather['rainfall_mm'].quantile(0.75) + 1.5 * (
-#        weather['rainfall_mm'].quantile(0.75) - weather['rainfall_mm'].quantile(0.25)
-#    )
-#)
-
 # ── Clean soil_sensor_data ────────────────────────────────────────────────────
 # S1: soil_moisture_pct NaN (Zone_B) → Zone_B median
 zone_b_moisture_median = soil.loc[soil['zone_id'] == 'Zone_B', 'soil_moisture_pct'].median()
