@@ -1,4 +1,4 @@
-# 🌾 HydroSense-Kenya: Precision Irrigation & Optimization System
+#  HydroSense-Kenya: Precision Irrigation & Optimization System
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![uv](https://img.shields.io/badge/Package%20Manager-uv-purple)](https://github.com/astral-sh/uv)
@@ -6,7 +6,7 @@
 
 **HydroSense-Kenya** is an algorithmic, data-driven agricultural water management system built for our Capstone Project. It transitions farming away from intuitive watering toward precision agriculture by minimizing water consumption and pumping costs while strictly adhering to the biological moisture thresholds of specific crops.
 
-## 🎯 Project Overview
+##  Project Overview
 This repository contains the end-to-end mathematical pipeline for the project, spanning from raw IoT sensor data imputation to complex continuous Differential Equation (ODE) solvers, culminating in a Model Predictive Control (MPC) optimization algorithm.
 
 ### Core Mathematical Implementations:
@@ -16,7 +16,7 @@ This repository contains the end-to-end mathematical pipeline for the project, s
 
 ---
 
-## 📁 Repository Architecture
+##  Repository Architecture
 
 To maintain strict separation of concerns, the mathematical engines are decoupled from the academic analysis layer. 
 
