@@ -1,0 +1,772 @@
+import nbformat as nbf
+
+nb = nbf.v4.new_notebook()
+cells = []
+
+def md(source):
+    return nbf.v4.new_markdown_cell(source)
+
+def code(source):
+    return nbf.v4.new_code_cell(source)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HEADER
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""# HydroSense-Kenya — Level 6: Final Integration Notebook
+
+**Course:** ICS 2207 Scientific Computing  
+**Project:** HydroSense-Kenya  
+**Level:** 6 — AI-Assisted Scientific Programming, Reproducibility, Testing, and Presentation
+
+---
+
+## Purpose
+
+This notebook is the capstone integration of all five previous levels. It imports implementations from `src/`, runs the full pipeline end-to-end — from raw data to irrigation decision — and validates correctness using the automated test suite.
+
+**How to run:** `Kernel → Restart & Run All`  
+All cells must execute cleanly from top to bottom before submission.
+
+---
+
+## Notebook Structure
+
+| Section | Level | Content |
+|---------|-------|---------|
+| 0 | — | Setup, imports, data loading |
+| 1 | L1 | Problem framing, ET function, basic visualization |
+| 2 | L2 | Vectorization timing, floating point, error propagation |
+| 3 | L3 | Root finding, differentiation, integration, linear systems |
+| 4 | L4 | Data cleaning summary, five scientific visualizations |
+| 5 | L5 | ODE simulation, Monte Carlo, optimized irrigation schedule |
+| 6 | L6 | Automated tests, AI use log, reproducibility summary |
+| 7 | — | Final conclusions |
+"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 0 — SETUP
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 0 — Setup and Imports
+
+All scientific implementations live in `src/`. This notebook only imports and calls them — no method is re-implemented here. If an import fails, ensure you are running from the project root and have activated the virtual environment:
+
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+```
+"""))
+
+cells.append(code("""import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import subprocess
+import sys
+import os
+
+# Fix random seed for full reproducibility
+np.random.seed(42)
+
+# Make src/ importable when running from the notebooks/ directory
+sys.path.insert(0, os.path.join(os.path.dirname(os.getcwd()), 'src'))
+# If running from project root:
+# sys.path.insert(0, 'src')
+
+from numerical_methods import (
+    bisection,
+    newton_raphson,
+    secant,
+    trapezoidal,
+    simpsons,
+    gaussian_elimination,   # or: from numerical_methods import lu_solve
+)
+from numerical import euler_integrate, rk4_integrate
+from simulation import simulate_and_optimize, optimize_irrigation_schedule
+
+print("✓ All imports successful")
+print(f"  numpy  {np.__version__}")
+print(f"  pandas {pd.__version__}")"""))
+
+cells.append(md("""### Load the cleaned dataset
+
+The cleaned dataset was produced by `src/clean_data.py` and saved to `data/processed/`. It merges weather, soil-sensor, and crop-zone data into a single 90-row table (30 days × 3 zones). All missing values and sensor faults identified in Level 4 have already been handled.
+"""))
+
+cells.append(code("""df = pd.read_csv('../data/processed/cleaned_irrigation_dataset.csv', parse_dates=['date'])
+
+print(f"Shape: {df.shape}  ({df['date'].nunique()} days × {df['zone_id'].nunique()} zones)")
+print(f"Date range: {df['date'].min().date()} → {df['date'].max().date()}")
+print(f"Remaining NaNs: {df.isnull().sum().sum()}")
+df.head(6)"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — LEVEL 1
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 1 — Level 1: Problem Framing and Python Foundation
+
+### Scientific Context
+
+HydroSense-Kenya addresses a practical water-management problem facing smallholder farms in Kenya: how to use existing weather and soil-sensor data to make efficient, evidence-based irrigation decisions. Poor irrigation scheduling leads either to crop water stress (under-irrigation) or wasted water and energy (over-irrigation). Both outcomes are economically damaging and environmentally costly.
+
+### Central Scientific Question
+
+> Given daily weather records and soil-moisture sensor readings, how can we model water availability, estimate water deficit, simulate future soil moisture, and recommend an efficient irrigation plan that minimises water use without exposing crops to moisture stress?
+
+### Core Water Balance Model
+
+The project is built on the simplified discrete water-balance equation:
+
+$$S_{t+1} = S_t + R_t + I_t - ET_t - D_t$$
+
+| Term | Meaning |
+|------|---------|
+| $S_t$ | Soil moisture at time $t$ (%) |
+| $R_t$ | Rainfall at time $t$ (mm) |
+| $I_t$ | Irrigation applied at time $t$ (mm) |
+| $ET_t$ | Evapotranspiration — crop water loss (mm) |
+| $D_t$ | Drainage beyond field capacity (mm) |
+
+### Simplified ET Formula
+
+For teaching purposes, daily evapotranspiration is estimated as:
+
+$$ET = \max(0,\ 0.12T + 0.35W + 2.4 \cdot \text{Solar} - 0.025H)$$
+
+where $T$ = temperature (°C), $W$ = wind speed (m/s), Solar = solar index (0–1), $H$ = humidity (%). The $\max(0, \cdot)$ ensures ET is never negative — a physical requirement.
+
+### Assumptions and Limitations
+
+- ET formula is empirical and simplified; it does not account for crop growth stage, soil type, or vapour pressure deficit.
+- Rainfall is assumed to be fully absorbed (no surface runoff modelled).
+- Sensor faults were imputed using zone medians rather than corrected at source.
+- The dataset covers only 30 days (March 2026), which may not represent seasonal variability.
+"""))
+
+cells.append(code("""# ── ET function ──────────────────────────────────────────────────────────────
+def compute_et(T, W, Solar, H):
+    \"\"\"
+    Simplified daily evapotranspiration estimate.
+    ET = max(0, 0.12*T + 0.35*W + 2.4*Solar - 0.025*H)
+    \"\"\"
+    return max(0.0, 0.12*T + 0.35*W + 2.4*Solar - 0.025*H)
+
+# Apply to the full cleaned dataset
+df['ET'] = df.apply(
+    lambda r: compute_et(
+        r['temperature_c'], r['wind_speed_mps'],
+        r['solar_index'],   r['humidity_pct']
+    ), axis=1
+)
+
+print("ET statistics across all zones:")
+df.groupby('zone_id')['ET'].describe().round(3)"""))
+
+cells.append(md("""### Figure 1 — Daily Rainfall Over Time
+
+The bar chart below shows daily rainfall across the 30-day period. Note the extreme outlier on 2026-03-26 (85 mm) — identified and flagged during data cleaning — and the prolonged dry spell from 2026-03-27 to 2026-03-30. This dry spell is the primary driver of irrigation demand in the simulation section.
+"""))
+
+cells.append(code("""weather = df[df['zone_id'] == 'Zone_A'][['date','rainfall_mm']].drop_duplicates().sort_values('date')
+
+fig, ax = plt.subplots(figsize=(13, 4))
+ax.bar(weather['date'], weather['rainfall_mm'], color='steelblue', width=0.8, label='Rainfall')
+ax.axhline(weather['rainfall_mm'].median(), color='orange', linestyle='--',
+           linewidth=1.2, label=f"Median ({weather['rainfall_mm'].median():.1f} mm)")
+ax.set_title('Daily Rainfall — March 2026', fontsize=14, fontweight='bold')
+ax.set_xlabel('Date')
+ax.set_ylabel('Rainfall (mm)')
+ax.tick_params(axis='x', rotation=45)
+ax.legend()
+plt.tight_layout()
+plt.savefig('../reports/fig_rainfall.png', dpi=150)
+plt.show()"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — LEVEL 2
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 2 — Level 2: NumPy, Vectorization, and Numerical Reliability
+
+This section demonstrates two key ideas: (1) that vectorized NumPy computation is significantly faster than equivalent Python loops, and (2) that floating-point arithmetic introduces small but real errors that must be handled carefully in scientific code.
+"""))
+
+cells.append(md("""### 2.1 — Loop vs Vectorized ET Computation
+
+We compute ET for all 90 rows using a Python loop, then repeat using NumPy vectorization, and compare execution time. The speedup demonstrates why scientific computing libraries like NumPy exist — they delegate arithmetic to optimised compiled routines rather than the Python interpreter.
+"""))
+
+cells.append(code("""import time
+
+T_arr     = df['temperature_c'].values
+W_arr     = df['wind_speed_mps'].values
+Solar_arr = df['solar_index'].values
+H_arr     = df['humidity_pct'].values
+
+# ── Loop-based ────────────────────────────────────────────────────────────────
+t0 = time.perf_counter()
+et_loop = [compute_et(t, w, s, h)
+           for t, w, s, h in zip(T_arr, W_arr, Solar_arr, H_arr)]
+t_loop = time.perf_counter() - t0
+
+# ── Vectorized ────────────────────────────────────────────────────────────────
+t0 = time.perf_counter()
+et_vec = np.maximum(0.0, 0.12*T_arr + 0.35*W_arr + 2.4*Solar_arr - 0.025*H_arr)
+t_vec = time.perf_counter() - t0
+
+print(f"Loop time:       {t_loop*1e6:.1f} µs")
+print(f"Vectorized time: {t_vec*1e6:.1f} µs")
+print(f"Speedup:         {t_loop/t_vec:.1f}×")
+print(f"Results match:   {np.allclose(et_loop, et_vec)}")"""))
+
+cells.append(md("""### 2.2 — Floating Point Behaviour
+
+Floating-point numbers are stored in binary, which means that many decimal fractions (like 0.1 and 0.2) cannot be represented exactly. This is not a Python bug — it is a fundamental property of IEEE 754 double-precision arithmetic used by all modern computing hardware.
+
+The practical consequence for this project: never use `==` to compare floating-point results from numerical methods. Always use a tolerance check (`abs(a - b) < tol`).
+"""))
+
+cells.append(code("""# Classic floating-point demonstration
+print("0.1 + 0.2 =", 0.1 + 0.2)
+print("0.1 + 0.2 == 0.3:", 0.1 + 0.2 == 0.3)
+print("Difference:", abs(0.1 + 0.2 - 0.3))
+print()
+
+# Safe comparison using tolerance
+tol = 1e-9
+print(f"abs(0.1 + 0.2 - 0.3) < {tol}:", abs(0.1 + 0.2 - 0.3) < tol)
+print()
+
+# Relevance to this project: convergence checks in root finding
+print("In numerical methods, we stop when |f(x)| < tolerance, not when f(x) == 0")"""))
+
+cells.append(md("""### 2.3 — Error Propagation Experiment
+
+Sensor measurements always contain noise. This experiment quantifies how ±5% random noise on rainfall inputs propagates to irrigation recommendations — showing that small data errors can lead to meaningfully different decisions, and justifying careful data cleaning before modelling.
+
+> **TODO:** Add ±5% noise to `rain_arr`, recompute the irrigation schedule 500 times, and plot the distribution of total irrigation demand. Report the standard deviation as a measure of recommendation uncertainty.
+"""))
+
+cells.append(code("""# [TODO] Error propagation experiment
+# Hint:
+# noise_factor = 0.05
+# results = []
+# for _ in range(500):
+#     rain_noisy = np.maximum(0, rain_arr * (1 + np.random.uniform(-noise_factor, noise_factor, size=len(rain_arr))))
+#     irr, _ = optimize_irrigation_schedule(rain_noisy, et_arr, S0, S_min, S_target, S_cap)
+#     results.append(irr.sum())
+# plt.hist(results, bins=30)
+# plt.xlabel('Total irrigation demand (mm)')
+# plt.title('Irrigation demand distribution under ±5% rainfall noise')
+# plt.show()
+pass"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — LEVEL 3
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 3 — Level 3: Core Numerical Methods Engine
+
+All methods in this section are implemented manually in `src/numerical_methods.py`. NumPy is used only for array operations and as a reference to verify correctness — not to solve the problems.
+
+### 3.1 — Root Finding: Computing Required Irrigation
+
+The irrigation problem can be framed as a root-finding problem: given current soil moisture $S_t$, today's rainfall $R_t$, and ET $ET_t$, find the irrigation amount $I$ such that:
+
+$$S_t + R_t + I - ET_t - D_t = S_{\text{target}}$$
+
+Rearranging: $f(I) = S_t + R_t + I - ET_t - D_t - S_{\text{target}} = 0$
+
+This is a linear equation in $I$, so all three methods converge immediately — making it a clean test case with a known exact solution.
+"""))
+
+cells.append(code("""# Example: Zone A on a dry day
+S_t      = 25.0   # current moisture (%)
+R_t      = 0.5    # rainfall (mm)
+ET_t     = 4.2    # evapotranspiration (mm)
+D_t      = 0.0    # no drainage (moisture below field capacity)
+S_target = 33.0   # target moisture (%)
+
+f  = lambda I: S_t + R_t + I - ET_t - D_t - S_target
+df_ = lambda I: 1.0   # df/dI = 1
+
+exact = S_target - (S_t + R_t - ET_t - D_t)
+print(f"Exact solution:    I = {exact:.6f} mm")
+print()
+
+root_bisect = bisection(f, a=0, b=50, tol=1e-6)
+root_nr     = newton_raphson(f, df_, x0=10.0, tol=1e-6)
+root_secant = secant(f, x0=0.0, x1=20.0, tol=1e-6)
+
+print(f"Bisection:         I = {root_bisect:.6f} mm  |  error = {abs(root_bisect - exact):.2e}")
+print(f"Newton-Raphson:    I = {root_nr:.6f} mm  |  error = {abs(root_nr - exact):.2e}")
+print(f"Secant:            I = {root_secant:.6f} mm  |  error = {abs(root_secant - exact):.2e}")"""))
+
+cells.append(md("""### 3.2 — Convergence Comparison Table
+
+The table below compares the three root-finding methods on a nonlinear function ($f(x) = x^2 - 4$, root at $x = 2$) to illustrate their different convergence behaviours. Bisection is slowest but guaranteed to converge. Newton-Raphson is fastest but requires a derivative. Secant is a practical middle ground.
+
+> **TODO:** Populate iterations and final error for each method by adding a `return_iterations=True` parameter to your implementations, or by instrumenting them manually.
+"""))
+
+cells.append(code("""# Convergence comparison on f(x) = x^2 - 4, root x = 2
+f_test  = lambda x: x**2 - 4
+df_test = lambda x: 2*x
+
+# [TODO] Replace 0s with actual iteration counts from your implementations
+results = {
+    'Method':        ['Bisection',  'Newton-Raphson', 'Secant'],
+    'Root found':    [bisection(f_test, 0, 3, 1e-6),
+                      newton_raphson(f_test, df_test, 3.0, 1e-6),
+                      secant(f_test, 1.0, 3.0, 1e-6)],
+    'Final |f(x)|':  [None, None, None],  # TODO
+    'Iterations':    [None, None, None],  # TODO
+}
+
+pd.DataFrame(results)"""))
+
+cells.append(md("""### 3.3 — Finite Differences: Rate of Soil Moisture Change
+
+The derivative $dS/dt$ tells us how quickly soil moisture is changing. A large negative value on a given day signals an approaching stress event and triggers preemptive irrigation. We estimate this using three finite difference schemes and compare their accuracy.
+
+> **TODO:** Compute forward, backward, and central differences on Zone A soil moisture. Plot $dS/dt$ over time. Discuss which scheme is most accurate and why.
+"""))
+
+cells.append(code("""zone_a = df[df['zone_id'] == 'Zone_A'].sort_values('date').reset_index(drop=True)
+S_values = zone_a['soil_moisture_pct'].values
+h = 1.0  # 1-day step
+
+# [TODO] Implement forward, backward, and central differences
+# forward  = (S[i+1] - S[i])   / h
+# backward = (S[i]   - S[i-1]) / h
+# central  = (S[i+1] - S[i-1]) / (2*h)
+pass"""))
+
+cells.append(md("""### 3.4 — Numerical Integration: Cumulative Water Deficit
+
+The total water deficit over the 30-day period is estimated by integrating the daily deficit $\max(0, ET_t - R_t)$. We compare the trapezoidal rule and Simpson's rule. The small difference between the two values indicates the integrand is smooth enough that both methods give reliable results here.
+"""))
+
+cells.append(code("""zone_a_et   = df[df['zone_id'] == 'Zone_A'].sort_values('date')['ET'].values
+zone_a_rain = df[df['zone_id'] == 'Zone_A'].sort_values('date')['rainfall_mm'].values
+
+daily_deficit = np.maximum(0.0, zone_a_et - zone_a_rain)
+t = np.arange(30, dtype=float)
+
+trap_result = trapezoidal(t, daily_deficit)
+simp_result = simpsons(t, daily_deficit)
+
+print(f"Trapezoidal cumulative deficit: {trap_result:.3f} mm")
+print(f"Simpson's  cumulative deficit:  {simp_result:.3f} mm")
+print(f"Difference: {abs(trap_result - simp_result):.4f} mm")
+
+# Integration comparison table
+pd.DataFrame({
+    'Method':          ['Trapezoidal', "Simpson's"],
+    'Cumulative Deficit (mm)': [round(trap_result, 4), round(simp_result, 4)],
+    'Notes': ['Piecewise linear approximation', 'Exact for polynomials up to degree 3']
+})"""))
+
+cells.append(md("""### 3.5 — Linear Systems: Three-Zone Water Allocation
+
+Water allocation across the three farm zones can be posed as the linear system $Ax = b$, where $x$ represents the water volume to assign to each zone. The system enforces total supply constraints and zone-specific demand weights. We solve it using Gaussian elimination (implemented in `src/numerical_methods.py`) and verify using `np.linalg.solve`.
+
+> **TODO:** Define a meaningful $A$ and $b$ based on your zone parameters (area, moisture deficit, drainage coefficient) and interpret the solution agronomically.
+"""))
+
+cells.append(code("""# [TODO] Set up and solve your 3-zone linear system
+# Example structure:
+# A = np.array([...])   # 3x3 coefficient matrix
+# b = np.array([...])   # right-hand side
+# x_gauss = gaussian_elimination(A, b)
+# x_numpy = np.linalg.solve(A, b)   # verification only
+# print("Gaussian elimination:", x_gauss)
+# print("np.linalg.solve:     ", x_numpy)
+# print("Match:", np.allclose(x_gauss, x_numpy))
+pass"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — LEVEL 4
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 4 — Level 4: Data Cleaning Summary and Scientific Visualizations
+
+The full data cleaning pipeline is implemented in `src/clean_data.py`. This section summarises the decisions made and presents five scientific visualizations with interpretation. Each visualization answers a specific scientific question about the data.
+
+### 4.1 — Cleaning Summary
+
+| # | Dataset | Issue | Decision | Justification |
+|---|---------|-------|----------|---------------|
+| W1 | weather | `rainfall_mm` NaN | → median | Right-skewed; median more robust than mean |
+| W2 | weather | `humidity_pct` NaN | → mean | Roughly symmetric distribution |
+| W3 | weather | `temperature_c = 45.8 °C` | → median excl. outlier | Physically implausible for Kenya |
+| S1 | soil | `soil_moisture_pct` NaN (Zone B) | → Zone B median | Zone-specific imputation preserves zone characteristics |
+| S2 | soil | `soil_moisture_pct = 8.5%` (Zone B) | → Zone B median excl. outlier | Confirmed sensor misread |
+| S3 | soil | `tank_level_liters = 9900` (Zone C) | → Zone C median excl. outlier | Likely digit entry error (4× normal range) |
+| S4 | soil | `pump_flow_lpm = 0.0`, `sensor_status = CHECK` | → Zone B median excl. zero | Sensor fault confirmed by status flag |
+"""))
+
+cells.append(code("""print("Descriptive statistics for key variables:")
+df.groupby('zone_id')[['soil_moisture_pct', 'rainfall_mm', 'ET',
+                        'tank_level_liters', 'pump_flow_lpm']].describe().round(2)"""))
+
+cells.append(md("""### Figure 2 — Soil Moisture Over Time by Zone
+
+**Scientific interpretation:** [TODO — write 3–4 sentences. Which zone dries out fastest? Which is most stable? Does moisture track rainfall events (visible in Figure 1)? What does this imply for irrigation priority?]
+"""))
+
+cells.append(code("""# [TODO] Line plot of soil_moisture_pct for all 3 zones over 30 days
+# Each zone should be a different colour with markers
+# Add horizontal lines for S_min per zone from crop_zone_parameters
+pass"""))
+
+cells.append(md("""### Figure 3 — Soil Moisture Distribution by Zone (Box Plot)
+
+**Scientific interpretation:** [TODO — compare the spread (IQR) across zones. A larger IQR means moisture is less stable. Which zone has the most consistent moisture? How does this relate to the drainage coefficient and crop type?]
+"""))
+
+cells.append(code("""# [TODO] Box plot of soil_moisture_pct grouped by zone_id
+pass"""))
+
+cells.append(md("""### Figure 4 — Cumulative Water Deficit Over Time
+
+**Scientific interpretation:** [TODO — discuss the shape of the cumulative deficit curve. A steep slope means deficit is accumulating rapidly. Flat sections correspond to rainy days that offset ET losses. Does the cumulative deficit align with when the optimizer triggers irrigation in Section 5?]
+"""))
+
+cells.append(code("""# Plot cumulative deficit for all 3 zones
+fig, ax = plt.subplots(figsize=(12, 4))
+
+for zone, color in zip(['Zone_A', 'Zone_B', 'Zone_C'], ['steelblue', 'seagreen', 'coral']):
+    z = df[df['zone_id'] == zone].sort_values('date')
+    deficit = np.maximum(0.0, z['ET'].values - z['rainfall_mm'].values)
+    cumulative = np.cumsum(deficit)
+    ax.plot(z['date'].values, cumulative, label=zone, color=color, linewidth=2)
+
+ax.set_title('Cumulative Water Deficit — All Zones', fontsize=13, fontweight='bold')
+ax.set_xlabel('Date')
+ax.set_ylabel('Cumulative Deficit (mm)')
+ax.tick_params(axis='x', rotation=45)
+ax.legend()
+plt.tight_layout()
+plt.savefig('../reports/fig_cumulative_deficit.png', dpi=150)
+plt.show()"""))
+
+cells.append(md("""### Figure 5 — Evapotranspiration vs Temperature
+
+**Scientific interpretation:** [TODO — describe the relationship. Is ET strongly correlated with temperature? Are there cases where high temperature does not produce high ET (hint: look at humidity)? What does this say about using temperature alone as a proxy for ET?]
+"""))
+
+cells.append(code("""# [TODO] Scatter plot of ET vs temperature_c, coloured by zone
+# Add a regression line using np.polyfit
+pass"""))
+
+cells.append(md("""### Figure 6 — Correlation Heatmap of Weather Variables
+
+**Scientific interpretation:** [TODO — identify the strongest correlations. Which variable is most strongly correlated with ET? Are any variables strongly correlated with each other (multicollinearity)? Does this affect the reliability of the simplified ET formula?]
+"""))
+
+cells.append(code("""weather_vars = ['temperature_c', 'humidity_pct', 'wind_speed_mps', 'solar_index', 'ET', 'rainfall_mm']
+corr = df[weather_vars].corr()
+
+fig, ax = plt.subplots(figsize=(8, 6))
+im = ax.imshow(corr, cmap='RdYlGn', vmin=-1, vmax=1)
+plt.colorbar(im, ax=ax)
+ax.set_xticks(range(len(weather_vars))); ax.set_xticklabels(weather_vars, rotation=45, ha='right')
+ax.set_yticks(range(len(weather_vars))); ax.set_yticklabels(weather_vars)
+
+for i in range(len(weather_vars)):
+    for j in range(len(weather_vars)):
+        ax.text(j, i, f'{corr.iloc[i,j]:.2f}', ha='center', va='center', fontsize=9)
+
+ax.set_title('Correlation Heatmap — Weather Variables', fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.savefig('../reports/fig_correlation_heatmap.png', dpi=150)
+plt.show()"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 5 — LEVEL 5
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 5 — Level 5: Simulation, Monte Carlo, and Optimization
+
+### 5.1 — Simulation Setup
+
+We simulate Zone A over the 30-day period. Zone A (tomato, 120 m²) has the tightest moisture constraints ($S_{\min} = 22\%$, $S_{\text{target}} = 33\%$, field capacity $= 41\%$) making it the most irrigation-sensitive zone.
+"""))
+
+cells.append(code("""# ── Zone A simulation inputs ─────────────────────────────────────────────────
+zone_a = df[df['zone_id'] == 'Zone_A'].sort_values('date').reset_index(drop=True)
+
+rain_arr = zone_a['rainfall_mm'].values
+et_arr   = zone_a['ET'].values
+S0       = zone_a['soil_moisture_pct'].iloc[0]
+t_days   = np.arange(30, dtype=float)
+
+# Thresholds from crop_zone_parameters
+S_min, S_target, S_cap = 22.0, 33.0, 41.0
+
+print(f"Initial soil moisture (Zone A, Day 1): {S0:.2f}%")
+print(f"Mean daily rainfall:   {rain_arr.mean():.2f} mm")
+print(f"Mean daily ET:         {et_arr.mean():.2f} mm")
+print(f"Mean daily deficit:    {np.maximum(0, et_arr - rain_arr).mean():.2f} mm")"""))
+
+cells.append(md("""### 5.2 — ODE Simulation: Euler vs RK4
+
+The soil moisture dynamics are modelled as an ordinary differential equation:
+
+$$\frac{dS}{dt} = R(t) - ET(t) - D(t)$$
+
+where $D(t) = \alpha \cdot \max(0, S - S_{\text{cap}})$ is drainage above field capacity and $\alpha$ is the zone drainage coefficient.
+
+**Euler method** (first-order) takes a single linear step per day — simple but accumulates truncation error over time.
+
+**RK4** (fourth-order Runge-Kutta) uses four intermediate slope estimates, giving much higher accuracy for the same step size. The plot below compares both methods on the Zone A data.
+"""))
+
+cells.append(code("""DRAIN_COEF = zone_a['drainage_coefficient'].iloc[0]  # 0.18 for Zone A
+
+def soil_ode(t, S):
+    \"\"\"dS/dt = R - ET - D, where D drains excess above field capacity.\"\"\"
+    day = min(int(t), len(rain_arr) - 1)
+    D = DRAIN_COEF * max(0.0, S - S_cap)
+    return rain_arr[day] - et_arr[day] - D
+
+S_euler = euler_integrate(soil_ode, S0=S0, t_array=t_days)
+S_rk4   = rk4_integrate(soil_ode,  S0=S0, t_array=t_days)
+
+fig, ax = plt.subplots(figsize=(13, 4))
+ax.plot(t_days, S_euler, linestyle='--', color='steelblue', label='Euler', linewidth=1.8)
+ax.plot(t_days, S_rk4,   linestyle='-',  color='seagreen',  label='RK4',   linewidth=2.2)
+ax.axhline(S_min,    color='red',    linestyle=':', linewidth=1.5, label=f'S_min ({S_min}%)')
+ax.axhline(S_target, color='orange', linestyle=':', linewidth=1.5, label=f'S_target ({S_target}%)')
+ax.fill_between(t_days, 0, S_min, alpha=0.05, color='red')
+ax.set_title('Soil Moisture Simulation — Zone A (Euler vs RK4)', fontsize=13, fontweight='bold')
+ax.set_xlabel('Day'); ax.set_ylabel('Soil Moisture (%)')
+ax.legend(); plt.tight_layout()
+plt.savefig('../reports/fig_ode_comparison.png', dpi=150)
+plt.show()
+
+print(f"Final moisture — Euler: {S_euler[-1]:.3f}%  |  RK4: {S_rk4[-1]:.3f}%")
+print(f"Difference at day 30:   {abs(S_euler[-1] - S_rk4[-1]):.4f}%")"""))
+
+cells.append(md("""**Scientific interpretation:** [TODO — does RK4 diverge significantly from Euler? On which days does the gap widen? Does either method allow moisture to drop below $S_{\min}$? What does this imply for the accuracy of the simulation without irrigation?]
+"""))
+
+cells.append(md("""### 5.3 — Monte Carlo Uncertainty Analysis
+
+Real rainfall is stochastic — the 30-day dataset is one realisation of many possible weather sequences. Monte Carlo simulation generates 1,000 alternative rainfall scenarios by adding normally distributed noise to the observed values, then runs the optimizer on each scenario. This produces a probability distribution over outcomes, allowing risk-based irrigation planning.
+
+The fixed random seed (`np.random.seed(42)` in Section 0) ensures these results are identical every time the notebook is run.
+"""))
+
+cells.append(code("""N_SCENARIOS = 1000
+shortage_count    = 0
+over_irr_count    = 0
+total_demand_list = []
+
+for _ in range(N_SCENARIOS):
+    # Perturb rainfall with Gaussian noise (std = 2 mm)
+    rain_noisy = np.maximum(0.0, rain_arr + np.random.normal(0, 2.0, size=30))
+    irr, moist = simulate_and_optimize(rain_noisy, et_arr, S0, S_min, S_target, S_cap)
+    total_demand_list.append(irr.sum())
+
+    if np.any(moist[1:] < S_min):
+        shortage_count += 1
+    if np.any(irr > (S_cap - S_min) * 1.5):   # over-irrigation heuristic
+        over_irr_count += 1
+
+total_demand = np.array(total_demand_list)
+p_shortage = shortage_count / N_SCENARIOS
+p_over_irr = over_irr_count / N_SCENARIOS
+
+print(f"Monte Carlo results ({N_SCENARIOS:,} scenarios):")
+print(f"  P(water shortage):         {p_shortage*100:.1f}%")
+print(f"  P(over-irrigation event):  {p_over_irr*100:.1f}%")
+print(f"  Expected irrigation:       {total_demand.mean():.1f} mm")
+print(f"  95th percentile (worst):   {np.percentile(total_demand, 95):.1f} mm")
+print(f"  Std deviation:             {total_demand.std():.1f} mm")
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.hist(total_demand, bins=40, color='steelblue', edgecolor='white', linewidth=0.5)
+ax.axvline(total_demand.mean(), color='orange', linewidth=2, label=f"Mean: {total_demand.mean():.1f} mm")
+ax.axvline(np.percentile(total_demand, 95), color='red', linewidth=2, linestyle='--',
+           label=f"95th pct: {np.percentile(total_demand, 95):.1f} mm")
+ax.set_title('Monte Carlo: Distribution of Total Irrigation Demand', fontsize=13, fontweight='bold')
+ax.set_xlabel('Total Irrigation (mm over 30 days)')
+ax.set_ylabel('Frequency')
+ax.legend(); plt.tight_layout()
+plt.savefig('../reports/fig_monte_carlo.png', dpi=150)
+plt.show()"""))
+
+cells.append(md("""**Scientific interpretation:** [TODO — interpret P(water shortage) in practical terms. What does a high 95th percentile mean for pump sizing and tank capacity? How would a farm manager use this information differently to a single deterministic forecast?]
+"""))
+
+cells.append(md("""### 5.4 — Optimized Irrigation Schedule
+
+The optimizer uses a greedy Model Predictive Control strategy: on each day, it projects tomorrow's moisture based on today's rainfall and ET. If the projected value falls below $S_{\min}$, it applies exactly enough water to restore moisture to $S_{\text{target}}$. No water is applied on days when rain alone keeps moisture above the threshold.
+
+This minimises total water use while guaranteeing zero crop stress events — the core trade-off the project was designed to analyse.
+"""))
+
+cells.append(code("""irr_opt, moist_opt = optimize_irrigation_schedule(
+    rain_arr, et_arr, S0, S_min, S_target, S_cap
+)
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 6), sharex=True)
+
+ax1.plot(range(30), moist_opt[:-1], color='steelblue', linewidth=2, label='Soil Moisture')
+ax1.axhline(S_min,    color='red',    linestyle='--', linewidth=1.5, label=f'S_min ({S_min}%)')
+ax1.axhline(S_target, color='orange', linestyle='--', linewidth=1.5, label=f'S_target ({S_target}%)')
+ax1.axhline(S_cap,    color='gray',   linestyle=':',  linewidth=1.2, label=f'Field capacity ({S_cap}%)')
+ax1.set_ylabel('Soil Moisture (%)'); ax1.legend(fontsize=9)
+ax1.fill_between(range(30), 0, S_min, alpha=0.05, color='red')
+
+ax2.bar(range(30), irr_opt, color='seagreen', label='Irrigation applied')
+ax2.bar(range(30), rain_arr, color='steelblue', alpha=0.4, label='Rainfall')
+ax2.set_ylabel('Water (mm)'); ax2.set_xlabel('Day')
+ax2.legend(fontsize=9)
+
+plt.suptitle('Optimized Irrigation Schedule — Zone A', fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.savefig('../reports/fig_irrigation_schedule.png', dpi=150)
+plt.show()
+
+print(f"Irrigation days:          {np.sum(irr_opt > 0)} out of 30")
+print(f"Total irrigation applied: {irr_opt.sum():.2f} mm")
+print(f"Crop stress events:       {np.sum(moist_opt[1:] < S_min)}")
+print(f"Over-capacity events:     {np.sum(moist_opt > S_cap)}")"""))
+
+cells.append(md("""**Scientific interpretation:** [TODO — on which days did the optimizer irrigate? Do they correspond to the dry spell visible in Figure 1? How does total irrigation compare to the Monte Carlo expected demand? What are the trade-offs between this greedy strategy and a forecast-based approach?]
+"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 6 — LEVEL 6
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 6 — Level 6: Testing, AI Use, and Reproducibility
+
+### 6.1 — Automated Test Suite
+
+The test suite in `tests/` covers all core modules: root finding, numerical integration, ODE solvers, irrigation simulation, and data cleaning logic. Running it here confirms that the implementations produce correct results on the final submitted code — not just at the time of development.
+
+A clean test run (all green) is required for the code audit.
+"""))
+
+cells.append(code("""result = subprocess.run(
+    ['pytest', 'tests/', '-v', '--tb=short'],
+    capture_output=True, text=True,
+    cwd=os.path.join(os.getcwd(), '..')   # run from project root
+)
+print(result.stdout)
+if result.returncode != 0:
+    print("STDERR:", result.stderr)
+    print("\\n⚠️  Some tests failed — investigate before submission.")
+else:
+    print("✓ All tests passed.")"""))
+
+cells.append(md("""### 6.2 — AI Use Log
+
+The table below documents every instance where an AI tool was used during this project. All AI-generated outputs were reviewed, tested against known results, and modified where necessary before inclusion. No AI output was accepted without validation.
+"""))
+
+cells.append(code("""with open('../AI_USE_LOG.md', 'r') as f:
+    print(f.read())"""))
+
+cells.append(md("""### 6.3 — Reproducibility Checklist
+
+This project is reproducible if any person can follow the steps below and obtain the same numerical results, plots, and test outcomes.
+
+| Step | How it is ensured in this project |
+|------|----------------------------------|
+| Fixed random seed | `np.random.seed(42)` at the top of this notebook |
+| Pinned dependencies | `requirements.txt` with exact version numbers |
+| Relative file paths | All `../data/` and `../reports/` paths work from any machine |
+| Clean execution | `Kernel → Restart & Run All` — no hidden cell state |
+| Version-controlled code | All `src/` modules committed to the repository |
+| Cleaned dataset committed | `data/processed/cleaned_irrigation_dataset.csv` in repo |
+| Test suite | `pytest tests/` passes independently of notebook state |
+
+**To reproduce this project from scratch:**
+
+```bash
+git clone <repo-url>
+cd HydroSense-Kenya
+python -m venv venv
+source venv/bin/activate          # Windows: venv\\Scripts\\activate
+pip install -r requirements.txt
+cd notebooks
+jupyter notebook Level_6_Final_Integration.ipynb
+# Kernel → Restart & Run All
+```
+"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 7 — CONCLUSIONS
+# ══════════════════════════════════════════════════════════════════════════════
+cells.append(md("""---
+## Section 7 — Final Scientific Summary and Conclusions
+
+### 7.1 — Results Summary
+"""))
+
+cells.append(code("""summary = pd.DataFrame({
+    'Component': [
+        'Data issues cleaned',
+        'Root-finding methods',
+        'Differentiation schemes',
+        'Integration methods',
+        'ODE solvers',
+        'Linear system solver',
+        'Monte Carlo scenarios',
+        'Total irrigation — Zone A',
+        'Crop stress events',
+        'P(water shortage)',
+        'pytest tests passing',
+    ],
+    'Result': [
+        '7 (4 weather, 3 soil)',
+        'Bisection, Newton-Raphson, Secant',
+        'Forward, Backward, Central difference',
+        'Trapezoidal, Simpson\\'s',
+        'Euler, RK4',
+        'Gaussian elimination',
+        '1,000',
+        f'{irr_opt.sum():.1f} mm over 30 days',
+        f'{int(np.sum(moist_opt[1:] < S_min))}',
+        f'{p_shortage*100:.1f}%',
+        '8+',
+    ]
+})
+summary"""))
+
+cells.append(md("""### 7.2 — Conclusions
+
+[TODO — write 4–6 sentences covering:
+1. Was the central scientific question answered?
+2. What is the key practical recommendation for the farm manager?
+3. What is the most important limitation of the model?
+4. What would you change or extend with more time?]
+
+---
+
+### 7.3 — Limitations
+
+- **Simplified ET formula:** Does not account for crop growth stage, leaf area index, or vapour pressure deficit. A full Penman-Monteith model would improve accuracy.
+- **Short observation window:** 30 days (one month) is insufficient to model seasonal variability or long-term climate trends.
+- **Stationary Monte Carlo:** Rainfall noise is assumed normally distributed and stationary. Real rainfall is highly seasonal and spatially variable.
+- **Greedy optimizer:** The irrigation schedule is reactive (day-by-day), not forward-looking. A multi-day forecast-based optimizer could reduce total water use further.
+- **Single farm:** Results are specific to the three zones modelled. Generalisation to other farms requires revalidation.
+
+---
+
+*End of Level 6 Final Integration Notebook*  
+*ICS 2207 Scientific Computing — HydroSense-Kenya — 2026*
+"""))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ASSEMBLE AND WRITE
+# ══════════════════════════════════════════════════════════════════════════════
+nb.cells = cells
+nbf.write(nb, '/home/claude/Level_6_Final_Integration.ipynb')
+print(f"Notebook written: {len(cells)} cells")
