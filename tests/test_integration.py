@@ -5,7 +5,7 @@ import os
 
 # Add src to path
 sys.path.append(os.path.abspath('../src'))
-from numerical_methods import rk4_integrate
+from src.numerical_methods import rk4_integrate
 
 def test_rk4_linear_function():
     """RK4 should perfectly solve the derivative dS/dt = 2t (Integral is t^2 + C)."""

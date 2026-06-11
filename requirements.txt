@@ -1,0 +1,26 @@
+# HydroSense-Kenya — Python dependencies
+# Generated for ICS 2207 Scientific Computing Capstone Project, 2026
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# To reproduce the exact environment used during development:
+#   python -m venv venv
+#   Linux: source venv/bin/activate        # Windows: venv\Scripts\activate
+#   pip install -r requirements.txt
+
+#core for scientific computing
+numpy==2.4.4
+pandas==3.0.2
+matplotlib==3.10.8
+
+#verification
+scipy==1.17.1
+
+#Testing
+pytest==8.3.5
+
+#notebook environment
+jupyter==1.1.1
+notebook==7.4.2
+ipykernel==6.29.5
