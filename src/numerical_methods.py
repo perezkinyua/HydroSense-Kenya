@@ -54,3 +54,50 @@ def rk4_integrate(deriv_func, S0, t_array):
         S[i] = max(0.0, S[i])
         
     return S
+
+# --- ADD THESE TO THE BOTTOM OF src/numerical_methods.py ---
+
+def bisection_method(func, a, b, tol=1e-5, max_iter=100):
+    """
+    Finds the root of a continuous function using the Bisection Method.
+    Used to find exact interception points (e.g., when moisture hits a threshold).
+    
+    Returns:
+    - root: The x-value where func(x) == 0
+    - iterations: Number of steps taken to converge
+    """
+    if func(a) * func(b) >= 0:
+        raise ValueError("Function must have opposite signs at endpoints a and b.")
+
+    for i in range(max_iter):
+        c = (a + b) / 2.0
+        
+        # Check if we hit the tolerance or exactly zero
+        if abs(func(c)) < tol or (b - a) / 2.0 < tol:
+            return c, i + 1 
+
+        if func(c) * func(a) < 0:
+            b = c
+        else:
+            a = c
+
+    raise TimeoutError("Bisection method did not converge.")
+
+def newton_raphson_method(func, deriv_func, x0, tol=1e-5, max_iter=100):
+    """
+    Finds the root of a function using the Newton-Raphson Method.
+    Provides significantly faster convergence using the function's analytical derivative.
+    """
+    x = x0
+    for i in range(max_iter):
+        fx = func(x)
+        if abs(fx) < tol:
+            return x, i + 1
+
+        dfx = deriv_func(x)
+        if dfx == 0:
+            raise ZeroDivisionError("Derivative is zero. Newton-Raphson failed.")
+
+        x = x - fx / dfx
+
+    raise TimeoutError("Newton-Raphson method did not converge.")
