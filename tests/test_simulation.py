@@ -4,7 +4,7 @@ import sys
 import os
 
 sys.path.append(os.path.abspath('../src'))
-from simulation import simulate_and_optimize
+from src.simulation import simulate_and_optimize
 
 def test_irrigation_logic():
     """Test that irrigation triggers when moisture drops below S_min."""
