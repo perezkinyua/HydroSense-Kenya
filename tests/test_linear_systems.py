@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import math
 import pytest
-from numerical_methods import gaussian_elimination
+from numerical_methods import gaussian_elimination # pyright: ignore[reportMissingImports]
 
 
 TOLERANCE = 1e-6
