@@ -109,14 +109,14 @@ class TestGaussianElimination:
         Matrix with floating point (non-integer) coefficients.
         1.5x + 2.5y = 7.0
         0.5x + 1.5y = 3.5
-        Solution: x=1.0, y=2.0
+        Solution: x=1.75, y=1.75
         """
         A = [[1.5, 2.5],
              [0.5, 1.5]]
         b = [7.0, 3.5]
         x = gaussian_elimination(A, b)
-        assert abs(x[0] - 1.0) < TOLERANCE
-        assert abs(x[1] - 2.0) < TOLERANCE
+        assert abs(x[0] - 1.75) < TOLERANCE
+        assert abs(x[1] - 1.75) < TOLERANCE
 
     # ── Residual checks (Ax = b) ──────────────
 
